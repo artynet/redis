@@ -1,0 +1,105 @@
+From: antirez <antirez@gmail.com>
+Date: Mon, 14 May 2018 17:49:06 +0200
+Subject: Security: update Lua struct package for security.
+
+During an auditing Apple found that the "struct" Lua package
+we ship with Redis (http://www.inf.puc-rio.br/~roberto/struct/) contains
+a security problem. A bound-checking statement fails because of integer
+overflow. The bug exists since we initially integrated this package with
+Lua, when scripting was introduced, so every version of Redis with
+EVAL/EVALSHA capabilities exposed is affected.
+
+Instead of just fixing the bug, the library was updated to the latest
+version shipped by the author.
+
+Origin: upstream, https://github.com/antirez/redis/commit/1eb08bcd
+---
+ deps/lua/src/lua_struct.c | 28 +++++++++++++++-------------
+ 1 file changed, 15 insertions(+), 13 deletions(-)
+
+diff --git a/deps/lua/src/lua_struct.c b/deps/lua/src/lua_struct.c
+index e263f8e..953c39b 100644
+--- a/deps/lua/src/lua_struct.c
++++ b/deps/lua/src/lua_struct.c
+@@ -296,24 +296,25 @@ static int b_unpack (lua_State *L) {
+   size_t ld;
+   const char *data = luaL_checklstring(L, 2, &ld);
+   size_t pos = luaL_optinteger(L, 3, 1);
++  int n = 0;  /* number of results */
+   luaL_argcheck(L, pos > 0, 3, "offset must be 1 or greater");
+   pos--; /* Lua indexes are 1-based, but here we want 0-based for C
+           * pointer math. */
+   defaultoptions(&h);
+-  lua_settop(L, 2);
+   while (*fmt) {
+     int opt = *fmt++;
+     size_t size = optsize(L, opt, &fmt);
+     pos += gettoalign(pos, &h, opt, size);
+     luaL_argcheck(L, size <= ld && pos <= ld - size,
+                    2, "data string too short");
+-    luaL_checkstack(L, 1, "too many results");
++    /* stack space for item + next position */
++    luaL_checkstack(L, 2, "too many results");
+     switch (opt) {
+       case 'b': case 'B': case 'h': case 'H':
+       case 'l': case 'L': case 'T': case 'i':  case 'I': {  /* integer types */
+         int issigned = islower(opt);
+         lua_Number res = getinteger(data+pos, h.endian, issigned, size);
+-        lua_pushnumber(L, res);
++        lua_pushnumber(L, res); n++;
+         break;
+       }
+       case 'x': {
+@@ -323,25 +324,26 @@ static int b_unpack (lua_State *L) {
+         float f;
+         memcpy(&f, data+pos, size);
+         correctbytes((char *)&f, sizeof(f), h.endian);
+-        lua_pushnumber(L, f);
++        lua_pushnumber(L, f); n++;
+         break;
+       }
+       case 'd': {
+         double d;
+         memcpy(&d, data+pos, size);
+         correctbytes((char *)&d, sizeof(d), h.endian);
+-        lua_pushnumber(L, d);
++        lua_pushnumber(L, d); n++;
+         break;
+       }
+       case 'c': {
+         if (size == 0) {
+-          if (!lua_isnumber(L, -1))
+-            luaL_error(L, "format `c0' needs a previous size");
++          if (n == 0 || !lua_isnumber(L, -1))
++            luaL_error(L, "format 'c0' needs a previous size");
+           size = lua_tonumber(L, -1);
+-          lua_pop(L, 1);
+-          luaL_argcheck(L, pos+size <= ld, 2, "data string too short");
++          lua_pop(L, 1); n--;
++          luaL_argcheck(L, size <= ld && pos <= ld - size,
++                           2, "data string too short");
+         }
+-        lua_pushlstring(L, data+pos, size);
++        lua_pushlstring(L, data+pos, size); n++;
+         break;
+       }
+       case 's': {
+@@ -349,15 +351,15 @@ static int b_unpack (lua_State *L) {
+         if (e == NULL)
+           luaL_error(L, "unfinished string in data");
+         size = (e - (data+pos)) + 1;
+-        lua_pushlstring(L, data+pos, size - 1);
++        lua_pushlstring(L, data+pos, size - 1); n++;
+         break;
+       }
+       default: controloptions(L, opt, &fmt, &h);
+     }
+     pos += size;
+   }
+-  lua_pushinteger(L, pos + 1);
+-  return lua_gettop(L) - 2;
++  lua_pushinteger(L, pos + 1);  /* next position */
++  return n + 1;
+ }
+ 
+ 
